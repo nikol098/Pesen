@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Light Show</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#cde;font-family:system-ui,sans-serif;overflow:hidden}
+  #light{position:fixed;inset:0;background:#7fd4ff;opacity:0}
+  #ui{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:24px}
+  #ui.hide{display:none}
+  button{font-size:1.2rem;padding:14px 28px;border:0;border-radius:12px;background:#7fd4ff;color:#012}
+  button:disabled{opacity:.4}
+</style>
+</head>
+<body>
+<div id="light"></div>
+<div id="ui">
+  <h2>Light Show</h2>
+  <div id="status">Connecting…</div>
+  <button id="go" disabled>Go fullscreen &amp; join</button>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+// ---- Cues: [start, end] in seconds of the media timeline ----
+const CUES = [
+  [10.255, 12.385], [12.980, 14.935], [15.562, 17.519],
+  [18.145, 19.220], [19.433, 19.970], [20.715, 22.699],
+  [23.304, 25.260], [25.885, 27.840], [28.466, 29.745]
+];
+const FLASH_MS = 50;   // full brightness
+const FADE_MS  = 1950; // then linear fade to black
+
+const $ = id => document.getElementById(id);
+const coordId = new URLSearchParams(location.search).get('c');
+
+// ---- Clock sync (offset = coordinatorClock - localClock, in ms) ----
+let offset = 0, samples = [];
+// ---- Show state ----
+let playing = false, coordStart = 0, trim = 0, fired = new Set(), lastCue = -1e9;
+let conn;
+
+const mediaTime = now => (now + offset - coordStart) / 1000 + trim / 1000;
+
+function ping() {
+  if (conn && conn.open) conn.send({ type: 'ping', t: performance.now() });
+}
+
+function onData(m) {
+  if (m.type === 'pong') {
+    const now = performance.now(), rtt = now - m.t;
+    samples.push({ rtt, off: m.c + rtt / 2 - now });
+    if (samples.length > 8) samples.shift();
+    offset = samples.reduce((a, b) => (b.rtt < a.rtt ? b : a)).off; // best (lowest RTT) sample
+  } else if (m.type === 'state') {
+    playing = m.playing;
+    coordStart = m.start;
+    trim = m.trim;
+    if (m.reset) {
+      const mt = mediaTime(performance.now());
+      fired = new Set();
+      CUES.forEach(([s], i) => { if (s < mt) fired.add(i); }); // don't replay past cues
+      if (!playing) navigator.vibrate && navigator.vibrate(0);
+    }
+  }
+}
+
+function connect() {
+  if (!coordId) { $('status').textContent = 'Missing coordinator link (?c=…)'; return; }
+  const peer = new Peer();
+  peer.on('open', () => {
+    conn = peer.connect(coordId);
+    conn.on('open', () => {
+      $('status').textContent = 'Connected. Tap to join the show.';
+      $('go').disabled = false;
+      let n = 0;
+      const loop = () => { ping(); setTimeout(loop, ++n < 12 ? 400 : 5000); };
+      loop();
+    });
+    conn.on('data', onData);
+    conn.on('close', () => { $('ui').classList.remove('hide'); $('status').textContent = 'Disconnected. Reloading…'; setTimeout(() => location.reload(), 2000); });
+  });
+  peer.on('error', e => { $('status').textContent = 'Error: ' + e.type; });
+}
+
+async function keepAwake() {
+  try { await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+
+$('go').onclick = () => {
+  const el = document.documentElement;
+  try { (el.requestFullscreen || el.webkitRequestFullscreen).call(el); } catch (e) {}
+  if (navigator.vibrate) navigator.vibrate(40); // short buzz: confirms it works, unlocks vibration
+  keepAwake();
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && keepAwake());
+  $('ui').classList.add('hide');
+};
+
+// ---- Render loop ----
+let lastOp = -1;
+function frame() {
+  const now = performance.now();
+  if (playing) {
+    const mt = mediaTime(now);
+    CUES.forEach(([s, e], i) => {
+      if (!fired.has(i) && mt >= s && mt < e) {
+        fired.add(i);
+        lastCue = now - (mt - s) * 1000;  // new cue cancels the previous fade
+        if (navigator.vibrate) navigator.vibrate(Math.round((e - mt) * 1000));
+      }
+    });
+  }
+  const age = now - lastCue;
+  const op = age < 0 ? 0 : age < FLASH_MS ? 1 : Math.max(0, 1 - (age - FLASH_MS) / FADE_MS);
+  if (op !== lastOp) { $('light').style.opacity = op; lastOp = op; }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+connect();
+</script>
+</body>
+</html>
