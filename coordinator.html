@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Light Show – Coordinator</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;background:#111;color:#dde}
+  input[type=text]{width:100%;padding:8px;box-sizing:border-box}
+  video{width:100%;margin-top:12px;background:#000}
+  .row{margin:14px 0}
+</style>
+</head>
+<body>
+<h2>Light Show – Coordinator</h2>
+
+<div class="row">Phones open this link:
+  <input type="text" id="link" readonly value="Starting…" onclick="this.select()">
+</div>
+<div class="row">Connected phones: <b id="count">0</b></div>
+<div class="row">Media file: <input type="file" id="file" accept="audio/*,video/*"></div>
+<div class="row">Light lead (ms): <input type="range" id="trim" min="-300" max="300" value="0">
+  <b id="trimv">0</b> <small>(positive = lights earlier, to compensate audio latency)</small></div>
+<video id="m" controls></video>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const m = $('m');
+const conns = new Set();
+let peer, trim = 0;
+
+function state(reset) {
+  const playing = !m.paused && !m.ended;
+  return {
+    type: 'state', playing, reset, trim,
+    start: performance.now() - m.currentTime * 1000 // coordinator clock at media time 0
+  };
+}
+const broadcast = reset => { const s = state(reset); conns.forEach(c => c.open && c.send(s)); };
+
+function init() {
+  const id = 'lightshow-' + Math.random().toString(36).slice(2, 6);
+  peer = new Peer(id);
+  peer.on('open', id => {
+    const base = location.href.replace(/coordinator\.html.*$/, '');
+    $('link').value = base + 'index.html?c=' + id;
+  });
+  peer.on('error', e => { if (e.type === 'unavailable-id') init(); else $('link').value = 'Error: ' + e.type; });
+  peer.on('connection', c => {
+    c.on('open', () => { conns.add(c); $('count').textContent = conns.size; c.send(state(true)); });
+    c.on('data', d => { if (d.type === 'ping') c.send({ type: 'pong', t: d.t, c: performance.now() }); });
+    c.on('close', () => { conns.delete(c); $('count').textContent = conns.size; });
+  });
+}
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (f) { m.src = URL.createObjectURL(f); broadcast(true); }
+};
+['playing', 'pause', 'seeked', 'ended'].forEach(ev => m.addEventListener(ev, () => broadcast(true)));
+setInterval(() => { if (!m.paused) broadcast(false); }, 1000); // keep phones aligned
+$('trim').oninput = e => { trim = +e.target.value; $('trimv').textContent = trim; broadcast(false); };
+
+init();
+</script>
+</body>
+</html>
